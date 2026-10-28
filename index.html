@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Murmur – a living flock that follows your hand</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0e0b14; --ink:#f4eef8; --muted:#b2a6c2; --panel:rgba(22,17,32,.82); --line:rgba(255,255,255,.14); --hi:#ff8a5c;
+  --display:"Fraunces",Georgia,"Times New Roman",serif;
+  --body:"Manrope",system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+.hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 24px) 28px 0;pointer-events:none;display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
+h1{font-family:var(--display);font-weight:700;font-size:clamp(2.6rem,8vw,5.5rem);line-height:.95;letter-spacing:-.03em;margin:0}
+.hud p{margin:12px 0 0;color:var(--muted);max-width:34ch;line-height:1.5}
+.count{font-family:var(--display);font-size:1.4rem;text-align:right;color:var(--muted)}
+.count b{display:block;font-size:2.4rem;color:var(--ink);font-weight:500}
+.panel{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 16px);width:min(680px,calc(100% - 24px));background:var(--panel);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:16px 18px}
+.row{display:flex;flex-wrap:wrap;gap:14px 24px;align-items:center}
+.row + .row{margin-top:14px}
+label{font-size:.85rem;color:var(--muted);display:flex;flex-direction:column;gap:6px;flex:1 1 140px}
+input[type=range]{width:100%;accent-color:var(--hi)}
+.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{font:600 .85rem var(--body);background:transparent;color:var(--muted);border:0;padding:9px 14px;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--ink);color:#1a1226}
+.chips{display:flex;gap:10px}
+.chip{width:34px;height:34px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0}
+.chip[aria-pressed=true]{border-color:var(--ink);outline:2px solid var(--bg);outline-offset:-5px}
+.reset{font:700 .85rem var(--body);background:transparent;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:9px 14px;cursor:pointer;margin-left:auto}
+:focus-visible{outline:3px solid var(--hi);outline-offset:2px}
+@media (max-width:560px){.count{display:none}.hud p{display:none}}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Interactive flock of particles. Move your pointer to steer them; press to scatter."></canvas>
+
+<div class="hud">
+  <div>
+    <h1>Murmur</h1>
+    <p>A flock that follows your hand. Move to steer it, press to scatter it.</p>
+  </div>
+  <div class="count" aria-live="off"><b id="n">0</b>in the flock</div>
+</div>
+
+<div class="panel" role="group" aria-label="Flock controls">
+  <div class="row">
+    <div class="seg" role="group" aria-label="Pointer behaviour">
+      <button data-mode="attract" aria-pressed="true">Attract</button>
+      <button data-mode="orbit" aria-pressed="false">Orbit</button>
+      <button data-mode="repel" aria-pressed="false">Repel</button>
+    </div>
+    <div class="chips" role="group" aria-label="Colour palette" id="chips"></div>
+    <button class="reset" id="reset">Reset</button>
+  </div>
+  <div class="row">
+    <label>Flock size<input type="range" id="size" min="40" max="500" value="260"></label>
+    <label>Cohesion<input type="range" id="coh" min="0" max="100" value="45"></label>
+    <label>Trails<input type="range" id="trail" min="0" max="95" value="72"></label>
+  </div>
+</div>
+
+<script>
+(function(){
+  var cv=document.getElementById('c'),ctx=cv.getContext('2d');
+  var W,H,dpr;
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var palettes=[
+    {name:'Ember',c:['#ff8a5c','#ffc46b','#ff5d73']},
+    {name:'Tide',c:['#5cd6ff','#6b8bff','#8af5d2']},
+    {name:'Moss',c:['#b6f26b','#5fd38d','#e9f58a']},
+    {name:'Dusk',c:['#c58bff','#ff8ad8','#8aa2ff']}
+  ];
+  var pal=0,mode='attract',target=260,coh=.45,trail=.72;
+  var boids=[],ptr={x:-1e4,y:-1e4,on:false,down:false},paused=false;
+  var speedScale=reduce?.6:1;
+
+  function resize(){
+    dpr=Math.min(window.devicePixelRatio||1,2);W=innerWidth;H=innerHeight;
+    cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.fillStyle='#0e0b14';ctx.fillRect(0,0,W,H);
+  }
+  resize();addEventListener('resize',resize);
+
+  function make(x,y){
+    var a=Math.random()*6.283;
+    return {x:x==null?Math.random()*W:x,y:y==null?Math.random()*H:y,vx:Math.cos(a)*2,vy:Math.sin(a)*2,k:Math.floor(Math.random()*3)};
+  }
+  function fit(){
+    while(boids.length<target)boids.push(make());
+    if(boids.length>target)boids.length=target;
+    document.getElementById('n').textContent=boids.length;
+  }
+  fit();
+
+  function step(){
+    var n=boids.length,maxV=3.4*speedScale,i,j,b,o;
+    for(i=0;i<n;i++){
+      b=boids[i];
+      var ax=0,ay=0,cx=0,cy=0,sx=0,sy=0,cnt=0;
+      for(j=0;j<n;j++){
+        if(i===j)continue;o=boids[j];
+        var dx=o.x-b.x,dy=o.y-b.y,d2=dx*dx+dy*dy;
+        if(d2<3600){
+          ax+=o.vx;ay+=o.vy;cx+=o.x;cy+=o.y;cnt++;
+          if(d2<324){sx-=dx;sy-=dy}
+        }
+      }
+      if(cnt){
+        b.vx+=(ax/cnt-b.vx)*.05+(cx/cnt-b.x)*.0009*coh*2+sx*.012;
+        b.vy+=(ay/cnt-b.vy)*.05+(cy/cnt-b.y)*.0009*coh*2+sy*.012;
+      }
+      if(ptr.on){
+        var px=ptr.x-b.x,py=ptr.y-b.y,pd=Math.sqrt(px*px+py*py)+.001;
+        if(ptr.down){
+          if(pd<220){var f=(1-pd/220)*1.6;b.vx-=px/pd*f;b.vy-=py/pd*f}
+        }else if(pd<300){
+          var s=(1-pd/300)*.22;
+          if(mode==='attract'){b.vx+=px/pd*s*2;b.vy+=py/pd*s*2}
+          else if(mode==='repel'){b.vx-=px/pd*s*3;b.vy-=py/pd*s*3}
+          else{b.vx+=(-py/pd)*s*2.4+px/pd*s*.5;b.vy+=(px/pd)*s*2.4+py/pd*s*.5}
+        }
+      }
+      var sp=Math.sqrt(b.vx*b.vx+b.vy*b.vy);
+      if(sp>maxV){b.vx=b.vx/sp*maxV;b.vy=b.vy/sp*maxV}
+      else if(sp<1.2){b.vx*=1.05;b.vy*=1.05}
+    }
+    for(i=0;i<n;i++){
+      b=boids[i];b.x+=b.vx;b.y+=b.vy;
+      if(b.x<-10)b.x=W+10;else if(b.x>W+10)b.x=-10;
+      if(b.y<-10)b.y=H+10;else if(b.y>H+10)b.y=-10;
+    }
+  }
+
+  function draw(){
+    ctx.fillStyle='rgba(14,11,20,'+(1-trail)+')';
+    ctx.fillRect(0,0,W,H);
+    var cols=palettes[pal].c;
+    for(var k=0;k<3;k++){
+      ctx.fillStyle=cols[k];ctx.beginPath();
+      for(var i=0;i<boids.length;i++){
+        var b=boids[i];if(b.k!==k)continue;
+        var a=Math.atan2(b.vy,b.vx),c=Math.cos(a),s=Math.sin(a);
+        ctx.moveTo(b.x+c*7,b.y+s*7);
+        ctx.lineTo(b.x-c*5-s*3,b.y-s*5+c*3);
+        ctx.lineTo(b.x-c*5+s*3,b.y-s*5-c*3);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+  }
+
+  function loop(){
+    if(!paused){step();draw()}
+    requestAnimationFrame(loop);
+  }
+  loop();
+
+  // pointer
+  function pos(e){ptr.x=e.clientX;ptr.y=e.clientY;ptr.on=true}
+  cv.addEventListener('pointermove',pos);
+  cv.addEventListener('pointerdown',function(e){pos(e);ptr.down=true;cv.setPointerCapture(e.pointerId)});
+  cv.addEventListener('pointerup',function(){ptr.down=false;if(!matchMedia('(hover:hover)').matches)ptr.on=false});
+  cv.addEventListener('pointerleave',function(){if(!ptr.down)ptr.on=false});
+  cv.addEventListener('dblclick',function(e){for(var i=0;i<25&&boids.length<500;i++)boids.push(make(e.clientX,e.clientY));target=boids.length;sync();document.getElementById('n').textContent=boids.length});
+
+  // controls
+  function sync(){document.getElementById('size').value=target}
+  var modeBtns=document.querySelectorAll('[data-mode]');
+  modeBtns.forEach(function(btn){btn.addEventListener('click',function(){
+    mode=btn.dataset.mode;modeBtns.forEach(function(x){x.setAttribute('aria-pressed',x===btn)});
+  })});
+  var chipsEl=document.getElementById('chips');
+  palettes.forEach(function(p,i){
+    var b=document.createElement('button');b.className='chip';b.setAttribute('aria-label',p.name+' palette');
+    b.setAttribute('aria-pressed',i===pal);
+    b.style.background='linear-gradient(135deg,'+p.c[0]+' 0 50%,'+p.c[1]+' 50% 100%)';
+    b.addEventListener('click',function(){pal=i;[].forEach.call(chipsEl.children,function(x,j){x.setAttribute('aria-pressed',j===i)})});
+    chipsEl.appendChild(b);
+  });
+  document.getElementById('size').addEventListener('input',function(e){target=+e.target.value;fit()});
+  document.getElementById('coh').addEventListener('input',function(e){coh=e.target.value/100});
+  document.getElementById('trail').addEventListener('input',function(e){trail=e.target.value/100});
+  document.getElementById('reset').addEventListener('click',function(){
+    boids=[];fit();ctx.fillStyle='#0e0b14';ctx.fillRect(0,0,W,H);
+  });
+  addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT')return;
+    if(e.key===' '){e.preventDefault();paused=!paused}
+    var n=parseInt(e.key,10);if(n>=1&&n<=4)chipsEl.children[n-1].click();
+  });
+  document.addEventListener('visibilitychange',function(){paused=document.hidden});
+})();
+</script>
+</body>
+</html>
